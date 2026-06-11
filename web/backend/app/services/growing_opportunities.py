@@ -1,0 +1,1057 @@
+from __future__ import annotations
+
+import json
+import logging
+import re
+import time
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta, timezone
+from html import unescape
+from pathlib import Path
+from uuid import uuid4
+from email.utils import parsedate_to_datetime
+
+import httpx
+from sqlalchemy.orm import Session
+
+from app.db.models import Block, GrowingOpportunityNewsCache, SatelliteTimeseries
+from app.schemas.growing_opportunities import (
+    GrowingOpportunityNewsResponse,
+    GrowingOpportunitiesResponse,
+    GrowingOpportunityFeedbackRequest,
+    GrowingOpportunityFeedbackResponse,
+    GrowingOpportunityNewsItem,
+    GrowingOpportunityRecommendation,
+)
+from app.schemas.satellite import BlockInsightsResponse
+from app.services.satellite_insights import satellite_insights_service
+from app.services.utils import calculate_confidence
+
+logger = logging.getLogger(__name__)
+
+
+class GrowingOpportunitiesService:
+    NEWS_CACHE_TTL_SECONDS = 15 * 60
+    NEWS_LIMIT = 8
+    NEWS_REQUEST_TIMEOUT_SECONDS = 12.0
+    NEWS_MAX_RETRIES = 3
+    NEWS_RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+    GOOGLE_NEWS_RSS_URL = "https://news.google.com/rss/search"
+    NEWS_REQUEST_HEADERS = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36 AgriTechNewsBot/1.0"
+        ),
+        "Accept": "application/rss+xml, application/xml, text/xml;q=0.9, */*;q=0.8",
+        "Accept-Language": "en-AU,en;q=0.9",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+    SOUTH_AUSTRALIA_TERMS = (
+        "south australia",
+        "south australian",
+        "riverland",
+        "adelaide",
+        "barossa",
+        "mclaren vale",
+        "clare valley",
+        "renmark",
+        "berri",
+        "loxton",
+        "waikerie",
+        "eyre peninsula",
+        "murraylands",
+        "murray bridge",
+        "limestone coast",
+    )
+    AGRICULTURE_TERMS = (
+        "agriculture",
+        "agricultural",
+        "farming",
+        "farmer",
+        "farmers",
+        "grower",
+        "growers",
+        "vineyard",
+        "vineyards",
+        "viticulture",
+        "grape",
+        "grapes",
+        "wine grape",
+        "wine grapes",
+        "winegrape",
+        "winegrapes",
+        "table grape",
+        "table grapes",
+        "grapegrower",
+        "grape grower",
+        "grape growers",
+        "winery",
+        "wineries",
+        "wine industry",
+        "wine sector",
+        "horticulture",
+        "crop",
+        "crops",
+        "orchard",
+        "orchards",
+        "almond",
+        "almonds",
+        "citrus grower",
+        "citrus growers",
+        "citrus",
+        "olive",
+        "olives",
+        "stone fruit",
+        "stonefruit",
+        "avocado",
+        "avocados",
+        "pistachio",
+        "pistachios",
+        "irrigation",
+        "water allocation",
+        "drought",
+        "primary industries",
+        "agribusiness",
+    )
+    PRIORITY_CROP_TERMS = (
+        "wine grape",
+        "wine grapes",
+        "grape",
+        "grapes",
+        "vineyard",
+        "vineyards",
+        "viticulture",
+        "winery",
+        "wineries",
+        "citrus",
+        "almond",
+        "almonds",
+        "olive",
+        "olives",
+        "orchard",
+        "orchards",
+        "stone fruit",
+        "stonefruit",
+        "avocado",
+        "avocados",
+        "pistachio",
+        "pistachios",
+    )
+    FUNDING_TERMS = (
+        "funding",
+        "grant",
+        "grants",
+        "rebate",
+        "rebates",
+        "subsidy",
+        "subsidies",
+        "support package",
+        "loan",
+        "loans",
+        "investment",
+    )
+    TOOLS_TERMS = (
+        "farm technology",
+        "agtech",
+        "precision agriculture",
+        "precision farming",
+        "smart irrigation",
+        "irrigation technology",
+        "irrigation system",
+        "irrigation systems",
+        "soil moisture sensor",
+        "soil moisture sensors",
+        "remote sensing",
+        "decision support",
+        "decision-support",
+        "farm management software",
+        "grower platform",
+        "agricultural platform",
+        "farm app",
+        "grower app",
+        "crop monitoring",
+        "sensor",
+        "sensors",
+        "drone",
+        "drones",
+        "satellite imaging",
+        "variable rate",
+        "automation",
+        "robotics",
+        "sprayer technology",
+        "harvest technology",
+        "weather station",
+        "weather stations",
+        "traceability",
+        "digital agronomy",
+        "equipment",
+        "machinery",
+        "farm equipment",
+        "agricultural equipment",
+        "vineyard equipment",
+        "orchard equipment",
+    )
+    HELP_TERMS = (
+        "guide",
+        "guides",
+        "advice",
+        "tips",
+        "how to",
+        "help",
+        "support",
+        "training",
+        "workshop",
+        "extension",
+        "resource",
+        "resources",
+        "program",
+        "programs",
+        "best practice",
+        "fact sheet",
+        "factsheet",
+        "webinar",
+    )
+    MARKET_TERMS = (
+        "market",
+        "prices",
+        "pricing",
+        "farmgate",
+        "commodity",
+        "export",
+        "exports",
+        "demand",
+        "supply",
+        "sales",
+        "auction",
+        "trade",
+        "contract",
+        "processor",
+        "processors",
+        "crush",
+        "intake",
+        "tonne",
+        "tonnes",
+        "vintage",
+        "wine sales",
+        "grape prices",
+        "crop prices",
+    )
+    NEGATIVE_NEWS_TERMS = (
+        "accident",
+        "killed",
+        "dies",
+        "death",
+        "fatal",
+        "fatality",
+        "murder",
+        "police",
+        "crime",
+        "crash",
+        "traffic",
+        "ambulance",
+        "hospital",
+        "court",
+        "charged",
+        "arrested",
+        "firefighters",
+        "bushfire",
+        "storm damage",
+        "obituary",
+    )
+    FARM_OPERATION_TERMS = (
+        "irrigation",
+        "water use",
+        "water allocation",
+        "soil moisture",
+        "fertigation",
+        "spray",
+        "sprayer",
+        "pest",
+        "disease",
+        "mildew",
+        "yield",
+        "harvest",
+        "canopy",
+        "pruning",
+        "nutrition",
+        "fertiliser",
+        "fertilizer",
+        "crop monitoring",
+        "orchard management",
+        "vineyard management",
+    )
+    def __init__(self) -> None:
+        self._news_cache: dict[str, tuple[datetime, list[GrowingOpportunityNewsItem], str | None]] = {}
+
+    def build_page_payload(
+        self,
+        db: Session,
+        block: Block,
+    ) -> GrowingOpportunitiesResponse:
+        insights = satellite_insights_service.get_block_insights(db, block)
+        observed_series = (
+            db.query(SatelliteTimeseries)
+            .filter(SatelliteTimeseries.block_id == block.id)
+            .order_by(SatelliteTimeseries.observed_on.desc())
+            .limit(3)
+            .all()
+        )
+        payload = {
+            "ndvi": insights.ndvi,
+            "ndwi": insights.ndwi,
+            "evi": insights.evi,
+            "ndre": insights.ndre,
+            "lai": insights.lai,
+        }
+        recommendations = self._build_recommendations(block, insights, payload, observed_series)
+        trend_summary = self._build_trend_summary(observed_series)
+
+        return GrowingOpportunitiesResponse(
+            block_id=str(block.id),
+            crop=block.crop,
+            status=insights.status,
+            freshness_status=insights.freshness_status,
+            source=insights.source,
+            search_window_from=insights.search_window_from,
+            search_window_to=insights.search_window_to,
+            data_quality=insights.data_quality,
+            composite_date_from=insights.composite_date_from,
+            composite_date_to=insights.composite_date_to,
+            last_satellite_update=insights.last_satellite_update,
+            data_age_days=insights.data_age_days,
+            ndvi=insights.ndvi,
+            ndwi=insights.ndwi,
+            evi=insights.evi,
+            ndre=insights.ndre,
+            lai=insights.lai,
+            cloud_cover_pct=insights.cloud_cover_pct,
+            pixel_count=insights.pixel_count,
+            map_tile_url=insights.map_tile_url,
+            confidence=calculate_confidence(insights),
+            warning=self._build_warning(block, insights),
+            trend_summary=trend_summary,
+            recommendations=recommendations,
+        )
+
+    def build_news_payload(
+        self,
+        db: Session,
+        block: Block,
+        *,
+        force_refresh: bool = False,
+    ) -> GrowingOpportunityNewsResponse:
+        news_items, news_warning = self._load_news_items(db, block, force_refresh=force_refresh)
+        return GrowingOpportunityNewsResponse(
+            block_id=str(block.id),
+            news_items=news_items,
+            news_warning=news_warning,
+        )
+
+    def save_feedback(
+        self,
+        block: Block,
+        feedback: GrowingOpportunityFeedbackRequest,
+    ) -> GrowingOpportunityFeedbackResponse:
+        feedback_id = str(uuid4())
+        feedback_path = Path(__file__).resolve().parents[2] / "data" / "growing_opportunities_feedback.jsonl"
+        feedback_path.parent.mkdir(parents=True, exist_ok=True)
+
+        record = {
+            "feedback_id": feedback_id,
+            "timestamp_utc": datetime.now(timezone.utc).isoformat(),
+            "block_id": str(block.id),
+            "block_lanslu": block.lanslu,
+            "recommendation_id": feedback.recommendation_id,
+            "helpful": feedback.helpful,
+            "notes": feedback.notes or "",
+        }
+
+        with feedback_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record) + "\n")
+
+        return GrowingOpportunityFeedbackResponse(saved=True, feedback_id=feedback_id)
+
+    def _build_recommendations(
+        self,
+        block: Block,
+        insights: BlockInsightsResponse,
+        payload: dict,
+        observed_series: list[SatelliteTimeseries],
+    ) -> list[GrowingOpportunityRecommendation]:
+        block_label = block.lanslu or block.crop or "this block"
+        recommendations: list[GrowingOpportunityRecommendation] = []
+
+        ndre = self._as_float(payload.get("ndre"))
+        evi = self._as_float(payload.get("evi"))
+        ndwi = self._as_float(payload.get("ndwi"))
+
+        if insights.data_quality == "no_data" or (ndre is None and evi is None and ndwi is None):
+            return [
+                GrowingOpportunityRecommendation(
+                    id="system-waiting",
+                    title="Satellite Recommendations Pending",
+                    category="system",
+                    severity="info",
+                    metric_key="system",
+                    metric_label="System",
+                    current_value=None,
+                    threshold="Live insight required",
+                    recommended_action="Retry after the next satellite refresh.",
+                    message="This block does not yet have enough usable satellite data for recommendation generation.",
+                    detail="Growing Opportunities needs valid NDRE, EVI, and NDWI readings before block actions can be generated from the Sentinel-2 composite.",
+                    trend_note=None,
+                    message_to_farmer=f"Satellite recommendations are not ready yet for {block_label}.",
+                )
+            ]
+
+        if ndre is not None and ndre < 0.25:
+            recommendations.append(
+                GrowingOpportunityRecommendation(
+                    id="foliar-nutrient-application",
+                    title="Foliar Nutrient Application",
+                    category="nutrient",
+                    severity="critical" if ndre < 0.12 else "warning",
+                    metric_key="ndre",
+                    metric_label="NDRE",
+                    current_value=round(ndre, 4),
+                    threshold="< 0.25",
+                    recommended_action="Check this block for a foliar nutrient application.",
+                    message=f"Nitrogen deficiency is likely in {block_label}.",
+                    detail="The latest satellite reading suggests chlorophyll activity is weaker than expected in this block, so a nutrient check is worth prioritising.",
+                    trend_note=self._ndre_trend_note(observed_series),
+                    message_to_farmer=f"Nitrogen deficiency likely in {block_label}. Foliar spray recommended.",
+                )
+            )
+
+        if evi is not None and evi > 0.50:
+            recommendations.append(
+                GrowingOpportunityRecommendation(
+                    id="canopy-management",
+                    title="Canopy Management",
+                    category="canopy",
+                    severity="info",
+                    metric_key="evi",
+                    metric_label="EVI",
+                    current_value=round(evi, 4),
+                    threshold="> 0.50",
+                    recommended_action="Review leaf removal and canopy airflow in this block.",
+                    message=f"Dense canopy conditions are present in {block_label}.",
+                    detail="The canopy looks quite dense in the latest pass, which can reduce airflow and raise mildew risk if it continues.",
+                    trend_note=self._metric_momentum_note(observed_series, "evi", "canopy density"),
+                    message_to_farmer=f"Dense canopy in {block_label}. Leaf removal may improve airflow and reduce mildew risk.",
+                )
+            )
+
+        if ndwi is not None and ndwi < -0.10:
+            urgent = ndwi < -0.30
+            recommendations.append(
+                GrowingOpportunityRecommendation(
+                    id="irrigation-opportunity",
+                    title="Irrigation Opportunity",
+                    category="irrigation",
+                    severity="critical" if urgent else "warning",
+                    metric_key="ndwi",
+                    metric_label="NDWI",
+                    current_value=round(ndwi, 4),
+                    threshold="< -0.10",
+                    recommended_action="Irrigate today." if urgent else "Consider irrigation within 2-3 days.",
+                    message=f"Water stress is being detected in {block_label}.",
+                    detail="The latest reading suggests this block is drying down, so irrigation timing should be reviewed before stress deepens.",
+                    trend_note=self._metric_momentum_note(observed_series, "ndwi", "water status"),
+                    message_to_farmer=(
+                        f"Severe water deficit in {block_label}. Irrigate today. Yield damage risk."
+                        if urgent
+                        else f"Water stress detected in {block_label}. Consider irrigation within 2-3 days."
+                    ),
+                )
+            )
+
+        if ndre is not None and 0.25 <= ndre <= 0.40 and self._is_declining_over_two_passes(observed_series, "ndre"):
+            recommendations.append(
+                GrowingOpportunityRecommendation(
+                    id="nutrient-trend-watch",
+                    title="Nutrient Trend Watch",
+                    category="trend",
+                    severity="info",
+                    metric_key="ndre",
+                    metric_label="NDRE trend",
+                    current_value=round(ndre, 4),
+                    threshold="0.25 to 0.40 and declining over 2 passes",
+                    recommended_action="Keep an eye on this block and prepare for a nutrient review if the decline continues.",
+                    message=f"Chlorophyll activity is still moderate in {block_label}, but the trend is softening.",
+                    detail="This is not an urgent nutrient issue yet, but the recent trend is moving the wrong way and deserves attention.",
+                    trend_note=self._ndre_trend_note(observed_series),
+                    message_to_farmer=f"NDRE is declining across consecutive passes in {block_label}. Plan foliar nutrient review if the next pass continues downward.",
+                )
+            )
+
+        if not recommendations:
+            recommendations.append(
+                GrowingOpportunityRecommendation(
+                    id="stable-conditions",
+                    title="Stable Conditions",
+                    category="system",
+                    severity="positive",
+                    metric_key="system",
+                    metric_label="Status",
+                    current_value="stable",
+                    threshold="No Growing Opportunities trigger crossed",
+                    recommended_action="Continue monitoring until the next satellite refresh.",
+                    message=f"{block_label} is not currently triggering the nutrient, canopy, or irrigation rules for this page.",
+                    detail="Nothing in the latest pass stands out as an immediate nutrient, canopy, or irrigation concern for this block.",
+                    trend_note=self._build_trend_summary(observed_series),
+                    message_to_farmer=f"No immediate Growing Opportunities action is triggered for {block_label}. Continue monitoring.",
+                )
+            )
+
+        return recommendations[:4]
+
+    def _build_warning(self, block: Block, insights: BlockInsightsResponse) -> str | None:
+        block_label = block.lanslu or str(block.id)
+        if insights.cloud_cover_pct is not None and insights.cloud_cover_pct > 50:
+            next_pass_days = self._estimate_days_to_next_pass(insights.data_age_days)
+            return (
+                f"Satellite data for {block_label} may be degraded due to cloud cover "
+                f"({insights.cloud_cover_pct:.0f}% cloud). Next clear pass estimated in {next_pass_days} days."
+            )
+        if insights.data_quality == "degraded":
+            next_pass_days = self._estimate_days_to_next_pass(insights.data_age_days)
+            return (
+                f"Satellite data for {block_label} may be degraded due to cloud contamination or low usable pixels. "
+                f"Next clear pass estimated in {next_pass_days} days."
+            )
+        if insights.data_quality == "no_data":
+            if insights.status == "updating":
+                return "Satellite intelligence is still being prepared for this block."
+            return "No usable satellite pixels were available for the selected period."
+        if insights.error:
+            return insights.error
+        return None
+
+    def _load_news_items(
+        self,
+        db: Session,
+        block: Block,
+        *,
+        force_refresh: bool = False,
+    ) -> tuple[list[GrowingOpportunityNewsItem], str | None]:
+        cache_key = (block.crop or "default").strip().lower() or "default"
+        cached_entry = self._news_cache.get(cache_key)
+        current_time = datetime.now(timezone.utc)
+        db_entry = self._get_db_cached_news(db, cache_key)
+
+        if (
+            not force_refresh
+            and cached_entry
+            and (current_time - cached_entry[0]).total_seconds() < self.NEWS_CACHE_TTL_SECONDS
+        ):
+            return cached_entry[1], cached_entry[2]
+        if not force_refresh and db_entry and db_entry.expires_at >= current_time:
+            news_items = self._deserialize_news_items(db_entry.payload)
+            self._news_cache[cache_key] = (current_time, news_items, db_entry.warning)
+            return news_items, db_entry.warning
+
+        try:
+            news_items = self._fetch_news_items(block)
+            news_warning = None if news_items else (
+                "No recent South Australia agriculture news matched the relevance filter right now."
+            )
+            self._store_db_cached_news(
+                db,
+                cache_key=cache_key,
+                query=" || ".join(self._build_news_queries(block)),
+                news_items=news_items,
+                warning=news_warning,
+                current_time=current_time,
+            )
+        except Exception as exc:
+            logger.warning("Growing Opportunities news fetch failed: %s", exc)
+            if cached_entry and cached_entry[1]:
+                return cached_entry[1], "Live South Australia agriculture news is temporarily unavailable. Showing cached results."
+            if db_entry and db_entry.payload:
+                stale_items = self._deserialize_news_items(db_entry.payload)
+                stale_warning = "Live South Australia agriculture news is temporarily unavailable. Showing saved fallback results."
+                self._news_cache[cache_key] = (current_time, stale_items, stale_warning)
+                return stale_items, stale_warning
+            news_items = []
+            news_warning = "Live South Australia agriculture news is temporarily unavailable."
+
+        self._news_cache[cache_key] = (current_time, news_items, news_warning)
+        return news_items, news_warning
+
+    def _fetch_news_items(self, block: Block) -> list[GrowingOpportunityNewsItem]:
+        queries = self._build_news_queries(block)
+        aggregated_items: list[GrowingOpportunityNewsItem] = []
+        seen_signatures: set[str] = set()
+
+        with httpx.Client(
+            timeout=self.NEWS_REQUEST_TIMEOUT_SECONDS,
+            follow_redirects=True,
+            headers=self.NEWS_REQUEST_HEADERS,
+        ) as client:
+            for query in queries:
+                response = self._fetch_google_news_rss_with_retry(
+                    client,
+                    query=query,
+                )
+                aggregated_items.extend(
+                    self._parse_google_news_rss(
+                        response.text,
+                        block,
+                        seen_signatures=seen_signatures,
+                        limit_results=False,
+                    )
+                )
+
+        aggregated_items.sort(
+            key=lambda news_item: (
+                self._parse_news_datetime(news_item.published_at) or datetime.min.replace(tzinfo=timezone.utc),
+                self._score_news_item(news_item.title, news_item.summary, block),
+            ),
+            reverse=True,
+        )
+        return aggregated_items[: self.NEWS_LIMIT]
+
+    def _fetch_google_news_rss_with_retry(self, client: httpx.Client, *, query: str) -> httpx.Response:
+        last_error: Exception | None = None
+        params = {
+            "q": query,
+            "hl": "en-AU",
+            "gl": "AU",
+            "ceid": "AU:en",
+        }
+
+        for attempt in range(1, self.NEWS_MAX_RETRIES + 1):
+            try:
+                response = client.get(self.GOOGLE_NEWS_RSS_URL, params=params)
+                if response.status_code in self.NEWS_RETRYABLE_STATUS_CODES:
+                    response.raise_for_status()
+                response.raise_for_status()
+                return response
+            except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError) as exc:
+                last_error = exc
+                status_code = exc.response.status_code if isinstance(exc, httpx.HTTPStatusError) and exc.response else None
+                should_retry = (
+                    attempt < self.NEWS_MAX_RETRIES
+                    and (
+                        status_code in self.NEWS_RETRYABLE_STATUS_CODES
+                        or isinstance(exc, (httpx.TimeoutException, httpx.NetworkError))
+                    )
+                )
+                logger.warning(
+                    "event=growing_opportunities_news_fetch_failed attempt=%s query=%s status=%s error=%s",
+                    attempt,
+                    query,
+                    status_code,
+                    exc,
+                )
+                if not should_retry:
+                    break
+                time.sleep(0.6 * attempt)
+
+        raise RuntimeError(f"Google News RSS fetch failed for query '{query}': {last_error}")
+
+    def _build_news_queries(self, block: Block) -> list[str]:
+        crop = (block.crop or "").strip()
+        broad_terms = (
+            "agriculture OR farming OR irrigation OR horticulture OR viticulture "
+            "OR vineyard OR vineyards OR crops OR growers OR livestock OR dairy "
+            "OR grain OR wine OR citrus OR almonds OR olives"
+        )
+        crop_clause = f' OR "{crop}"' if crop else ""
+        base_region = '("South Australia" OR Riverland)'
+
+        return [
+            f'{base_region} ({broad_terms}{crop_clause})',
+            (
+                f'{base_region} ((market OR prices OR pricing OR farmgate OR commodity OR export OR trade '
+                f'OR contract OR sales OR auction OR demand OR supply OR "grape prices" OR vintage){crop_clause}) '
+                f'({broad_terms}))'
+            ),
+            (
+                f'{base_region} ((funding OR grant OR grants OR rebate OR rebates OR subsidy OR subsidies '
+                f'OR loan OR loans OR investment OR tender){crop_clause}) ({broad_terms}))'
+            ),
+            (
+                f'{base_region} (("farm technology" OR agtech OR "precision agriculture" OR "smart irrigation" '
+                f'OR "soil moisture sensor" OR "farm management software" OR "crop monitoring" OR drone '
+                f'OR robotics OR automation OR "weather station"){crop_clause}) ({broad_terms}))'
+            ),
+            (
+                f'{base_region} ((guide OR guides OR advice OR training OR workshop OR extension OR resource '
+                f'OR resources OR webinar OR "fact sheet" OR "best practice"){crop_clause}) ({broad_terms}))'
+            ),
+        ]
+
+    def _parse_google_news_rss(
+        self,
+        payload: str,
+        block: Block,
+        *,
+        seen_signatures: set[str] | None = None,
+        limit_results: bool = True,
+    ) -> list[GrowingOpportunityNewsItem]:
+        parsed_items: list[GrowingOpportunityNewsItem] = []
+        local_seen_signatures = seen_signatures if seen_signatures is not None else set()
+        current_year = datetime.now(timezone.utc).year
+        try:
+            root = ET.fromstring(payload)
+        except ET.ParseError as exc:
+            raise RuntimeError(f"Unable to parse Google News RSS payload: {exc}") from exc
+
+        for item in root.findall("./channel/item"):
+            title = (item.findtext("title") or "").strip()
+            link = (item.findtext("link") or "").strip()
+            published_at = (item.findtext("pubDate") or "").strip() or None
+            source_name = self._extract_source_from_title(title) or "Google News"
+            summary = self._clean_html_text((item.findtext("description") or "").strip())
+            published_datetime = self._parse_news_datetime(published_at)
+
+            if not title or not link:
+                continue
+            if not published_datetime or published_datetime.year != current_year:
+                continue
+            if not self._is_relevant_news_item(title, summary, block):
+                continue
+            signature = self._normalise_news_signature(title, link)
+            if signature in local_seen_signatures:
+                continue
+            local_seen_signatures.add(signature)
+
+            parsed_items.append(
+                GrowingOpportunityNewsItem(
+                    id=self._build_news_id(link),
+                    title=self._clean_title(title),
+                    summary=summary,
+                    source=source_name,
+                    source_url=link,
+                    published_at=published_datetime.isoformat(),
+                    category=self._classify_news_category(title, summary),
+                    tags=self._extract_news_tags(title, summary, block),
+                )
+            )
+
+        parsed_items.sort(
+            key=lambda news_item: (
+                self._parse_news_datetime(news_item.published_at) or datetime.min.replace(tzinfo=timezone.utc),
+                self._score_news_item(news_item.title, news_item.summary, block),
+            ),
+            reverse=True,
+        )
+        if limit_results:
+            return parsed_items[: self.NEWS_LIMIT]
+        return parsed_items
+
+    def _get_db_cached_news(self, db: Session, cache_key: str) -> GrowingOpportunityNewsCache | None:
+        return (
+            db.query(GrowingOpportunityNewsCache)
+            .filter(GrowingOpportunityNewsCache.cache_key == cache_key)
+            .one_or_none()
+        )
+
+    def _store_db_cached_news(
+        self,
+        db: Session,
+        *,
+        cache_key: str,
+        query: str,
+        news_items: list[GrowingOpportunityNewsItem],
+        warning: str | None,
+        current_time: datetime,
+    ) -> None:
+        expires_at = current_time + timedelta(seconds=self.NEWS_CACHE_TTL_SECONDS)
+        payload = [item.model_dump() for item in news_items]
+        record = self._get_db_cached_news(db, cache_key)
+        if record is None:
+            record = GrowingOpportunityNewsCache(
+                cache_key=cache_key,
+                query=query,
+                payload=payload,
+                warning=warning,
+                refreshed_at=current_time,
+                expires_at=expires_at,
+            )
+            db.add(record)
+        else:
+            record.query = query
+            record.payload = payload
+            record.warning = warning
+            record.refreshed_at = current_time
+            record.expires_at = expires_at
+        db.commit()
+
+    def _deserialize_news_items(self, payload: object) -> list[GrowingOpportunityNewsItem]:
+        if not isinstance(payload, list):
+            return []
+        items: list[GrowingOpportunityNewsItem] = []
+        for item in payload:
+            if not isinstance(item, dict):
+                continue
+            try:
+                items.append(GrowingOpportunityNewsItem.model_validate(item))
+            except Exception:
+                continue
+        return items
+
+    def _is_relevant_news_item(self, title: str, summary: str, block: Block) -> bool:
+        haystack = f"{title} {summary}".lower()
+        south_australia_hits = self._count_term_matches(haystack, self.SOUTH_AUSTRALIA_TERMS)
+        agriculture_hits = self._count_term_matches(haystack, self.AGRICULTURE_TERMS)
+        priority_crop_hits = self._count_term_matches(haystack, self.PRIORITY_CROP_TERMS)
+        farm_operation_hits = self._count_term_matches(haystack, self.FARM_OPERATION_TERMS)
+        market_term_hits = self._count_term_matches(haystack, self.MARKET_TERMS)
+        crop = (block.crop or "").strip().lower()
+        crop_hit = bool(crop and self._contains_term(haystack, crop))
+
+        has_strong_ag_context = any(
+            (
+                agriculture_hits >= 2,
+                priority_crop_hits >= 1,
+                crop_hit,
+                farm_operation_hits >= 1,
+                market_term_hits >= 1,
+            )
+        )
+
+        if south_australia_hits == 0 or not has_strong_ag_context:
+            return False
+
+        if self._contains_negative_news_terms(haystack) and not (
+            priority_crop_hits >= 2 or crop_hit or farm_operation_hits >= 2
+        ):
+            return False
+
+        return self._score_news_item(title, summary, block) >= 8
+
+    def _score_news_item(self, title: str, summary: str, block: Block) -> int:
+        haystack = f"{title} {summary}".lower()
+        score = 0
+
+        south_australia_hits = self._count_term_matches(haystack, self.SOUTH_AUSTRALIA_TERMS)
+        agriculture_hits = self._count_term_matches(haystack, self.AGRICULTURE_TERMS)
+        farm_operation_hits = self._count_term_matches(haystack, self.FARM_OPERATION_TERMS)
+        market_term_hits = self._count_term_matches(haystack, self.MARKET_TERMS)
+
+        if south_australia_hits:
+            score += 4 + min(south_australia_hits, 3)
+        if agriculture_hits:
+            score += 3 + min(agriculture_hits, 4)
+        if farm_operation_hits:
+            score += 2 + min(farm_operation_hits, 3)
+        if market_term_hits:
+            score += 2 + min(market_term_hits, 3)
+
+        crop = (block.crop or "").strip().lower()
+        if crop and self._contains_term(haystack, crop):
+            score += 4
+
+        priority_crop_hits = self._count_term_matches(haystack, self.PRIORITY_CROP_TERMS)
+        if priority_crop_hits:
+            score += 3 + min(priority_crop_hits, 4)
+
+        if self._contains_term(haystack, "south australia") and (
+            self._contains_term(haystack, "grower") or self._contains_term(haystack, "farm")
+        ):
+            score += 2
+        if self._contains_term(haystack, "riverland") and (
+            self._contains_term(haystack, "grape")
+            or self._contains_term(haystack, "vineyard")
+            or self._contains_term(haystack, "irrigation")
+        ):
+            score += 2
+        if self._contains_negative_news_terms(haystack):
+            score -= 6
+
+        return score
+
+    def _extract_news_tags(self, title: str, summary: str, block: Block) -> list[str]:
+        haystack = f"{title} {summary}".lower()
+        tags: list[str] = []
+        category = self._classify_news_category(title, summary)
+
+        if self._contains_term(haystack, "south australia") or self._count_term_matches(haystack, self.SOUTH_AUSTRALIA_TERMS):
+            tags.append("South Australia")
+        if self._contains_term(haystack, "riverland"):
+            tags.append("Riverland")
+
+        crop = (block.crop or "").strip()
+        if crop and self._contains_term(haystack, crop.lower()):
+            tags.append(crop)
+
+        for label, term_group in (
+            ("Market", ("market", "prices", "farmgate", "commodity", "trade", "export", "auction")),
+            ("Irrigation", ("irrigation", "water allocation", "water")),
+            ("Viticulture", ("vineyard", "viticulture", "wine grape", "grape")),
+            ("Horticulture", ("horticulture", "orchard", "citrus", "olive", "almond")),
+            ("Farming", ("agriculture", "agricultural", "farming", "farmers", "growers")),
+        ):
+            if self._count_term_matches(haystack, term_group) and label not in tags:
+                tags.append(label)
+
+        category_label_map = {
+            "funding": "Funding",
+            "tools": "Tools",
+            "help": "Farmer Help",
+            "general": "General",
+        }
+        category_label = category_label_map.get(category)
+        if category_label and category_label not in tags:
+            tags.append(category_label)
+
+        return tags[:4]
+
+    def _classify_news_category(self, title: str, summary: str) -> str:
+        haystack = f"{title} {summary}".lower()
+        has_ag_context = self._has_agriculture_context(haystack)
+        has_funding_terms = self._count_term_matches(haystack, self.FUNDING_TERMS) > 0
+        has_help_terms = self._count_term_matches(haystack, self.HELP_TERMS) > 0
+        tool_term_hits = self._count_term_matches(haystack, self.TOOLS_TERMS)
+        operation_term_hits = self._count_term_matches(haystack, self.FARM_OPERATION_TERMS)
+
+        if has_ag_context and has_funding_terms:
+            return "funding"
+        if has_ag_context and tool_term_hits > 0 and operation_term_hits > 0:
+            return "tools"
+        if has_ag_context and has_help_terms:
+            return "help"
+        return "general"
+
+    def _has_agriculture_context(self, haystack: str) -> bool:
+        return (
+            self._count_term_matches(haystack, self.AGRICULTURE_TERMS) > 0
+            or self._count_term_matches(haystack, self.FARM_OPERATION_TERMS) > 0
+        )
+
+    def _contains_negative_news_terms(self, haystack: str) -> bool:
+        return self._count_term_matches(haystack, self.NEGATIVE_NEWS_TERMS) > 0
+
+    @staticmethod
+    def _contains_term(haystack: str, term: str) -> bool:
+        return re.search(rf"(?<![a-z0-9]){re.escape(term.lower())}(?![a-z0-9])", haystack) is not None
+
+    def _count_term_matches(self, haystack: str, terms: tuple[str, ...]) -> int:
+        return sum(1 for term in terms if self._contains_term(haystack, term))
+
+    @staticmethod
+    def _normalise_news_signature(title: str, link: str) -> str:
+        cleaned_title = re.sub(r"[^a-z0-9]+", " ", title.lower()).strip()
+        cleaned_link = re.sub(r"[?#].*$", "", link.lower()).strip()
+        return f"{cleaned_title}|{cleaned_link}"
+
+    def _build_trend_summary(self, observed_series: list[SatelliteTimeseries]) -> str | None:
+        if len(observed_series) < 2:
+            return "Only one cached satellite pass is available, so trend analysis is limited."
+
+        latest = observed_series[0]
+        previous = observed_series[1]
+        messages: list[str] = []
+
+        if latest.ndre is not None and previous.ndre is not None:
+            direction = "up" if latest.ndre > previous.ndre else "down" if latest.ndre < previous.ndre else "flat"
+            messages.append(f"NDRE is trending {direction} versus the previous cached pass.")
+
+        if latest.evi is not None and previous.evi is not None:
+            direction = "up" if latest.evi > previous.evi else "down" if latest.evi < previous.evi else "flat"
+            messages.append(f"EVI is trending {direction} versus the previous cached pass.")
+
+        if latest.ndwi is not None and previous.ndwi is not None:
+            direction = "up" if latest.ndwi > previous.ndwi else "down" if latest.ndwi < previous.ndwi else "flat"
+            messages.append(f"NDWI is trending {direction} versus the previous cached pass.")
+
+        return " ".join(messages) if messages else "Recent trend comparison is not available for this block."
+
+    def _ndre_trend_note(self, observed_series: list[SatelliteTimeseries]) -> str | None:
+        if self._is_declining_over_two_passes(observed_series, "ndre"):
+            return "Nutrient activity has softened across the last two passes."
+        if len(observed_series) < 2:
+            return "A few more satellite passes are needed before we can comment on the trend with confidence."
+        return "The nutrient trend is not showing a clear two-pass decline right now."
+
+    def _metric_momentum_note(self, observed_series: list[SatelliteTimeseries], field_name: str, label: str) -> str | None:
+        if len(observed_series) < 2:
+            return f"More cached passes are needed to confirm {label} momentum."
+
+        latest_value = getattr(observed_series[0], field_name, None)
+        previous_value = getattr(observed_series[1], field_name, None)
+        if latest_value is None or previous_value is None:
+            return f"The recent {label} trend could not be calculated."
+        if latest_value > previous_value:
+            return f"The latest pass looks slightly stronger than the previous one for {label}."
+        if latest_value < previous_value:
+            return f"The latest pass looks slightly weaker than the previous one for {label}."
+        return f"The last two passes are mostly steady for {label}."
+
+    def _is_declining_over_two_passes(self, observed_series: list[SatelliteTimeseries], field_name: str) -> bool:
+        if len(observed_series) < 3:
+            return False
+
+        latest = getattr(observed_series[0], field_name, None)
+        previous = getattr(observed_series[1], field_name, None)
+        older = getattr(observed_series[2], field_name, None)
+        if latest is None or previous is None or older is None:
+            return False
+
+        return latest < previous < older
+
+    @staticmethod
+    def _build_news_id(link: str) -> str:
+        return re.sub(r"[^a-z0-9]+", "-", link.lower()).strip("-")[:80] or str(uuid4())
+
+    @staticmethod
+    def _clean_title(title: str) -> str:
+        if " - " not in title:
+            return title
+        headline, _, suffix = title.rpartition(" - ")
+        return headline if suffix else title
+
+    @staticmethod
+    def _extract_source_from_title(title: str) -> str:
+        if " - " not in title:
+            return ""
+        _, _, suffix = title.rpartition(" - ")
+        return suffix.strip()
+
+    @staticmethod
+    def _clean_html_text(value: str) -> str:
+        text = re.sub(r"<[^>]+>", " ", value)
+        text = unescape(text)
+        text = re.sub(r"\s+", " ", text).strip()
+        return text
+
+    @staticmethod
+    def _parse_news_datetime(value: str | None) -> datetime | None:
+        if not value:
+            return None
+        try:
+            parsed = parsedate_to_datetime(value)
+        except (TypeError, ValueError, IndexError):
+            try:
+                parsed = datetime.fromisoformat(value)
+            except ValueError:
+                return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    @staticmethod
+    def _as_float(value: object) -> float | None:
+        if value is None:
+            return None
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            return None
+        return numeric
+
+    @staticmethod
+    def _estimate_days_to_next_pass(data_age_days: int | None) -> int:
+        if data_age_days is None or data_age_days < 0:
+            return 5
+
+        days_since_last_pass = data_age_days % 5
+        return 5 if days_since_last_pass == 0 else 5 - days_since_last_pass
+
+
+growing_opportunities_service = GrowingOpportunitiesService()

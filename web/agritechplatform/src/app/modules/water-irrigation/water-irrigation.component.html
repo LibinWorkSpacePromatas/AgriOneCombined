@@ -1,0 +1,299 @@
+<div class="page-container fade-in">
+  <div *ngIf="isLoading" class="loading-overlay">
+    <div class="loading-spinner"></div>
+    <p>Loading irrigation data...</p>
+  </div>
+
+  <div *ngIf="error && !isLoading" class="error-banner">
+    <i-lucide [img]="AlertIcon" class="error-icon"></i-lucide>
+    <span>{{ error }}</span>
+    <button class="retry-btn" (click)="refreshData()">Retry</button>
+  </div>
+
+  <div class="content-wrapper">
+    <div class="dashboard-grid">
+      <div class="left-column">
+        <div class="card header-card shadow-sm field-panel overview-card">
+          <div class="header-content">
+            <div class="header-hero">
+              <div class="title-group">
+                <div class="icon-box primary">
+                  <i-lucide [img]="DropletIcon" class="page-icon"></i-lucide>
+                </div>
+                <div>
+                  <span class="eyebrow-tag">Field Water Control</span>
+                  <h1>Water & Irrigation</h1>
+                </div>
+              </div>
+              <div class="hero-chip-row">
+                <span class="hero-chip">Satellite NDWI</span>
+                <span class="hero-chip accent">Live boundary tools</span>
+              </div>
+            </div>
+
+            <div class="overview-grid">
+              <div class="block-selector feature-card">
+                <span class="label">SELECT BLOCK</span>
+                <div class="block-dropdown-wrap" (click)="$event.stopPropagation()">
+                  <button type="button" class="block-dropdown-btn" (click)="toggleBlockMenu()">
+                    <span class="block-dropdown-text">{{ selectedBlockName || 'Select block' }}</span>
+                    <span class="block-dropdown-caret" [class.open]="isBlockMenuOpen"></span>
+                  </button>
+                  <div class="block-dropdown-menu" *ngIf="isBlockMenuOpen">
+                    <button
+                      type="button"
+                      class="block-option"
+                      *ngFor="let block of blocks"
+                      [class.active]="block.id === selectedBlockId"
+                      (click)="selectBlock(block.id)">
+                      {{ block.name }}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              <div class="overview-metric-card feature-card">
+                <span class="label">MAP MODE</span>
+                <span class="summary-chip mode-chip overview-chip">
+                  {{
+                    irrigationStatus?.mapTileUrl
+                      ? 'NDWI Zone Map (Water Stress)'
+                      : 'Block Polygon'
+                  }}
+                </span>
+              </div>
+            </div>
+
+            <div class="location-picker feature-strip">
+              <div class="location-copy">
+                <span class="label">FIELD LOCATION</span>
+                <span class="location-title">Centroid and live map mode</span>
+              </div>
+              <div class="coords-input">
+                <div class="field">
+                  <span class="label">CENTROID LAT</span>
+                  <input type="text" [ngModel]="latitude | number:'1.4-4'" readonly>
+                </div>
+                <div class="field">
+                  <span class="label">CENTROID LON</span>
+                  <input type="text" [ngModel]="longitude | number:'1.4-4'" readonly>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="map-shell">
+          <div class="map-card-panel">
+            <div class="map-shell-header">
+              <div>
+                <h3>Boundary and irrigation view</h3>
+              </div>
+            </div>
+
+            <div class="map-wrapper card shadow-md">
+              <div id="map"></div>
+              <div class="map-floating-controls" (click)="$event.stopPropagation()">
+                <div class="layer-control">
+                  <button
+                    type="button"
+                    class="layer-toggle-btn"
+                    [class.active]="isBaseMapMenuOpen"
+                    (click)="toggleBaseMapMenu($event)"
+                    aria-label="Open map layers">
+                    <i-lucide [img]="LayersIcon"></i-lucide>
+                  </button>
+
+                  <div class="layer-menu" *ngIf="isBaseMapMenuOpen">
+                    <button
+                      *ngFor="let mode of baseMapModes"
+                      type="button"
+                      class="layer-option-btn"
+                      [class.active]="currentBaseMap === mode"
+                      (click)="setBaseMap(mode)">
+                      {{ mode === 'road' ? 'Road' : mode === 'terrain' ? 'Terrain' : 'Satellite' }}
+                    </button>
+                  </div>
+                </div>
+              </div>
+              <div class="map-glow"></div>
+              <div class="map-overlay" *ngIf="error">
+                <div class="error-msg">
+                  <i-lucide [img]="AlertIcon"></i-lucide>
+                  {{ error }}
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="right-column">
+        <ng-container *ngIf="irrigationStatus">
+          <div class="ndwi-card card shadow-sm float-in" [ngClass]="getNdwiTone(getSatelliteInsightLabel())">
+            <div class="card-title ndwi-card-header">
+              <div class="ndwi-card-heading">
+                <i-lucide [img]="DropletIcon"></i-lucide>
+                <div>
+                  <h3>Current NDWI</h3>
+                </div>
+              </div>
+              <div class="info-popover-wrap">
+                <button
+                  type="button"
+                  class="info-icon-btn"
+                  title="How this is calculated"
+                  aria-label="Show NDWI interpretation help">
+                  <i-lucide [img]="InfoIcon"></i-lucide>
+                </button>
+                <div class="info-popover-panel" role="tooltip">
+                  <div class="info-panel-title">How NDWI is interpreted</div>
+                  <code>NDWI &gt; 0.1 -> Well-watered</code>
+                  <code>-0.1 to 0.1 -> Mild stress</code>
+                  <code>-0.3 to -0.1 -> Moderate stress</code>
+                  <code>NDWI &lt; -0.3 -> Severe stress</code>
+                </div>
+              </div>
+            </div>
+            <div class="ndwi-hero">
+              <div class="ndwi-meta-row ndwi-status-row">
+                <span class="ndwi-status-chip" [ngClass]="getNdwiTone(getSatelliteInsightLabel())">
+                  {{ getStatusHeadline(getSatelliteInsightLabel()) }}
+                </span>
+                <span class="status-pill neutral" *ngIf="irrigationStatus.date">
+                  Latest: {{ irrigationStatus.date | date:'mediumDate' }}
+                </span>
+              </div>
+              <div class="ndwi-visual-row">
+                <div class="crop-visual-card" [ngClass]="[getNdwiTone(getSatelliteInsightLabel()), getCropVisualClass()]">
+                    <div class="water-fill-visual" [ngClass]="getNdwiTone(getSatelliteInsightLabel())">
+                      <div class="water-fill-stage minimal">
+                        <div class="water-reservoir minimal">
+                          <div class="water-fill-shell minimal">
+                            <div class="water-fill-depth" [style.height.%]="getWaterFillLevel(irrigationStatus.ndwi)">
+                              <div class="water-fill-wave wave-back"></div>
+                              <div class="water-fill-wave wave-front"></div>
+                              <div class="water-fill-bubbles">
+                                <span class="bubble bubble-a"></span>
+                                <span class="bubble bubble-b"></span>
+                                <span class="bubble bubble-c"></span>
+                              </div>
+                            </div>
+                            <div class="water-fill-gloss"></div>
+                            <div class="water-fill-ripple"></div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                </div>
+                <div class="ndwi-value-group">
+                  <span class="urgency-badge" [ngClass]="getUrgencyTone(getSatelliteInsightLabel())">
+                    {{ getUrgencyLabel(getSatelliteInsightLabel()) }}
+                  </span>
+                  <div class="ndwi-value">
+                    {{ irrigationStatus.ndwi !== null ? (irrigationStatus.ndwi | number:'1.4-4') : 'N/A' }}
+                  </div>
+                  <div class="ndwi-value-copy">
+                    <span class="ndwi-value-label">Satellite Insight</span>
+                    <p class="ndwi-support-copy">{{ getStatusExplanation(getSatelliteInsightLabel()) }}</p>
+
+                    <span class="ndwi-value-label">Final Decision</span>
+                    <p class="ndwi-support-copy">{{ getDecisionSummary() }}</p>
+                    <p class="ndwi-support-copy decision-warning" *ngIf="currentDecision?.warning">
+                      {{ currentDecision?.warning }}
+                    </p>
+                    <div class="decision-action-summary" *ngIf="currentDecision">
+                      <span class="ndwi-value-label">Recommended Action</span>
+                      <p class="decision-action-value" [ngClass]="getDecisionButtonTone()">
+                        {{ getRecommendedActionLabel() }}
+                      </p>
+                    </div>
+                    <div *ngIf="currentDecision?.water_needed_mm" class="ndwi-smart-metric mt-2">
+                      <span class="ndwi-value-label">Estimated Water</span>
+                      <p class="ndwi-support-copy font-bold text-blue-600">💧 {{ currentDecision?.water_needed_mm }} mm</p>
+                      <p class="ndwi-support-copy" *ngIf="currentDecision?.water_needed_liters">
+                        ≈ {{ ((currentDecision?.water_needed_liters || 0) / 1000000) | number:'1.1-2' }} ML
+                      </p>
+                    </div>
+                    
+                    
+
+                    <div class="irrigation-demo-panel" [class.has-override]="shouldShowOverrideButton()">
+                      <button
+                        type="button"
+                        class="irrigate-now-btn"
+                        [ngClass]="getDecisionButtonTone()"
+                        [class.running]="isPumpRunning"
+                        [disabled]="!canStartPrimaryDecisionAction()"
+                        (click)="triggerPrimaryDecisionAction()">
+                        {{ getDecisionButtonLabel() }}
+                      </button>
+                      <button
+                        *ngIf="shouldShowOverrideButton()"
+                        type="button"
+                        class="irrigation-secondary-btn"
+                        [disabled]="!canStartOverrideIrrigation()"
+                        (click)="triggerOverrideIrrigation()">
+                        Irrigate Anyway
+                      </button>
+                      <p class="irrigation-demo-note" *ngIf="pumpDemoMessage">{{ pumpDemoMessage }}</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+          </div>
+        </ng-container>
+        <div *ngIf="!irrigationStatus && !isLoading" class="empty-state card shadow-sm">
+          <i-lucide [img]="MapPinIcon"></i-lucide>
+          <p>Select a block to see irrigation details</p>
+        </div>
+
+        <div class="card shadow-sm tools-card">
+          <div class="tools-card-header">
+            <h3>Boundary and location actions</h3>
+          </div>
+
+          <div class="tools-stack">
+            <div class="tools-section">
+              <span class="label">Boundary Tools</span>
+              <div class="boundary-actions">
+                <button class="boundary-action-btn clear" (click)="clearBoundary()">Clear boundary</button>
+                <label class="boundary-action-btn upload">
+                  Upload shapefile (.zip)
+                  <input type="file" (change)="uploadShapefile($event)" accept=".zip,.shp" style="display:none;">
+                </label>
+                <div class="info-popover-wrap upload-info-popover">
+                  <button
+                    type="button"
+                    class="info-icon-btn upload-info-btn"
+                    aria-label="Show shapefile upload help">
+                    <i-lucide [img]="InfoIcon"></i-lucide>
+                  </button>
+                  <div class="info-popover-panel upload-popover-panel" role="tooltip">
+                    <div class="info-panel-title">Shapefile upload</div>
+                    <p class="upload-popover-copy">Use a zipped shapefile with .shp, .shx, .dbf, and .prj files.</p>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div class="tools-section location-inline-section">
+              <div class="map-control-copy">
+                <span class="label">Change Location</span>
+                <span class="map-control-subtitle">Tap the map to place a new centroid</span>
+              </div>
+              <div class="map-action-group">
+                <button class="retry-btn map-action-btn" [class.active]="isMoveMode" (click)="toggleMoveMode()">
+                  {{ isMoveMode ? 'Disable Move' : 'Enable Move' }}
+                </button>
+                <button class="retry-btn map-action-btn save" [disabled]="!isMoveMode || pendingLat === null || pendingLon === null" (click)="saveNewLocation()">Save Location</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

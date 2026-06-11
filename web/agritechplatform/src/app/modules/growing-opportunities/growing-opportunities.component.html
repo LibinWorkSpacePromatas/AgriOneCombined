@@ -1,0 +1,282 @@
+<div class="page-container fade-in">
+    <div class="page-header">
+        <div class="header-title-section">
+            <i-lucide [img]="SproutIcon" class="page-icon"></i-lucide>
+            <div>
+                <h1>Growing Opportunities</h1>
+                <p class="subtitle">Live block actions first, then broader diversification options for Riverland growers</p>
+            </div>
+        </div>
+    </div>
+
+    <div class="page-tabs" role="tablist" aria-label="Growing opportunities views">
+        <button
+            type="button"
+            class="page-tab"
+            [class.active]="activeTab === 'recommendations'"
+            [attr.aria-selected]="activeTab === 'recommendations'"
+            (click)="setActiveTab('recommendations')">
+            Recommendations
+            <span class="page-tab-count">{{ liveRecommendations.length }}</span>
+        </button>
+        <button
+            type="button"
+            class="page-tab"
+            [class.active]="activeTab === 'updates'"
+            [attr.aria-selected]="activeTab === 'updates'"
+            (click)="setActiveTab('updates')">
+            News & More
+        </button>
+    </div>
+
+    <section class="live-section" *ngIf="activeTab === 'recommendations'">
+        <div class="section-heading">
+            <div>
+                <p class="section-kicker">Recommended Actions</p>
+                <h2>Clear next steps for this block</h2>
+            </div>
+        </div>
+
+        <div class="inline-warning" *ngIf="pageWarning">
+            {{ pageWarning }}
+        </div>
+
+        <div class="feedback-banner" *ngIf="feedbackMessage">
+            {{ feedbackMessage }}
+        </div>
+
+        <div class="recommendations-grid">
+            <article
+                class="recommendation-card"
+                *ngFor="let recommendation of liveRecommendations; trackBy: trackByRecommendation"
+                [class.severity-critical]="recommendation.severity === 'critical'"
+                [class.severity-warning]="recommendation.severity === 'warning'"
+                [class.severity-info]="recommendation.severity === 'info'"
+                [class.severity-positive]="recommendation.severity === 'positive'">
+                <div class="recommendation-header">
+                    <div class="recommendation-icon">
+                        <i-lucide [img]="getRecommendationIcon(recommendation)"></i-lucide>
+                    </div>
+                    <div class="recommendation-copy">
+                        <div class="recommendation-topline">
+                            <p class="recommendation-label">{{ getSeverityLabel(recommendation) }}</p>
+                            <span class="recommendation-metric">{{ getPlainMetricLabel(recommendation) }}</span>
+                        </div>
+                        <h3>{{ recommendation.title }}</h3>
+                        <p class="recommendation-summary">{{ withFriendlyBlockName(recommendation.message) }}</p>
+                    </div>
+                </div>
+
+                <div class="recommendation-glance" aria-label="Recommendation summary">
+                    <div class="glance-chip">
+                        <span class="glance-label">Why it matters</span>
+                        <strong>{{ recommendation.threshold }}</strong>
+                    </div>
+                    <div class="glance-chip">
+                        <div class="glance-label-row">
+                            <div class="glance-label-group">
+                                <span class="glance-label">Current reading</span>
+                                <span class="reading-info">
+                                    <button
+                                        type="button"
+                                        class="info-trigger"
+                                        [attr.aria-label]="'What this reading means for ' + getPlainMetricLabel(recommendation)">
+                                        <i-lucide [img]="InfoIcon"></i-lucide>
+                                    </button>
+                                    <span class="reading-tooltip" role="tooltip">
+                                        <span class="reading-tooltip-title">What this value means</span>
+                                        <span class="reading-tooltip-line" *ngFor="let item of getReadingMeaningTooltip(recommendation)">
+                                            {{ item }}
+                                        </span>
+                                    </span>
+                                </span>
+                            </div>
+                        </div>
+                        <strong>{{ formatRecommendationValue(recommendation.current_value) }}</strong>
+                        <div class="reading-status">{{ getReadingStatusLabel(recommendation) }}</div>
+                    </div>
+                </div>
+
+                <div class="recommendation-body">
+                    <div class="recommendation-section">
+                        <span class="section-label">What this means</span>
+                        <p class="recommendation-detail">{{ withFriendlyBlockName(recommendation.detail) }}</p>
+                    </div>
+
+                    <div class="recommendation-callout">
+                        <span class="callout-label">What to do now</span>
+                        <p class="recommendation-farmer">{{ withFriendlyBlockName(recommendation.recommended_action) }}</p>
+                    </div>
+                </div>
+
+                <p class="recommendation-trend" *ngIf="recommendation.trend_note">
+                    {{ withFriendlyBlockName(recommendation.trend_note) }}
+                </p>
+
+                <div class="feedback-row" *ngIf="pageData?.feedback_enabled">
+                    <span class="feedback-label">Was this recommendation accurate?</span>
+                    <div class="feedback-actions">
+                        <button
+                            type="button"
+                            class="feedback-button"
+                            [class.selected]="isFeedbackSelected(recommendation.id, 'helpful')"
+                            [disabled]="feedbackState[recommendation.id] === 'saving'"
+                            (click)="submitFeedback(recommendation, true)">
+                            <i-lucide [img]="ThumbsUpIcon"></i-lucide>
+                            Helpful
+                        </button>
+                        <button
+                            type="button"
+                            class="feedback-button"
+                            [class.selected]="isFeedbackSelected(recommendation.id, 'not_helpful')"
+                            [disabled]="feedbackState[recommendation.id] === 'saving'"
+                            (click)="submitFeedback(recommendation, false)">
+                            <i-lucide [img]="ThumbsDownIcon"></i-lucide>
+                            Not helpful
+                        </button>
+                    </div>
+                </div>
+            </article>
+        </div>
+    </section>
+
+    <section class="library-section" *ngIf="activeTab === 'updates'">
+        <div class="section-heading">
+            <div>
+                <p class="section-kicker">South Australia News</p>
+                <h2>Latest South Australia grower news from this year</h2>
+            </div>
+            <button
+                type="button"
+                class="news-refresh-button"
+                [disabled]="isNewsLoading || !currentBlock"
+                (click)="refreshNews()">
+                <span class="news-refresh-icon-wrap" [class.spinning]="isNewsRefreshAnimating" aria-hidden="true">
+                    <i-lucide [img]="RefreshCwIcon" class="news-refresh-icon"></i-lucide>
+                </span>
+                <span class="news-refresh-label">Refresh News</span>
+            </button>
+        </div>
+
+        <div class="news-filter-row" aria-label="News filters">
+            <button
+                type="button"
+                class="news-filter-button"
+                [class.active]="isNewsFilterActive('all')"
+                (click)="setActiveNewsFilter('all')">
+                Latest
+                <span class="news-filter-count">{{ getNewsFilterCount('all') }}</span>
+            </button>
+            <button
+                type="button"
+                class="news-filter-button"
+                [class.active]="isNewsFilterActive('funding')"
+                (click)="setActiveNewsFilter('funding')">
+                Funding
+                <span class="news-filter-count">{{ getNewsFilterCount('funding') }}</span>
+            </button>
+            <button
+                type="button"
+                class="news-filter-button"
+                [class.active]="isNewsFilterActive('tools')"
+                (click)="setActiveNewsFilter('tools')">
+                Tools
+                <span class="news-filter-count">{{ getNewsFilterCount('tools') }}</span>
+            </button>
+            <button
+                type="button"
+                class="news-filter-button"
+                [class.active]="isNewsFilterActive('help')"
+                (click)="setActiveNewsFilter('help')">
+                Farmer Help
+                <span class="news-filter-count">{{ getNewsFilterCount('help') }}</span>
+            </button>
+            <button
+                type="button"
+                class="news-filter-button"
+                [class.active]="isNewsFilterActive('general')"
+                (click)="setActiveNewsFilter('general')">
+                Articles
+                <span class="news-filter-count">{{ getNewsFilterCount('general') }}</span>
+            </button>
+        </div>
+
+        <div class="inline-warning" *ngIf="newsWarning">
+            {{ newsWarning }}
+        </div>
+
+        <div class="inline-warning" *ngIf="isNewsLoading && !filteredNewsItems.length">
+            Loading the latest South Australia grower headlines...
+        </div>
+
+        <div class="opportunities-grid">
+            <div class="opportunity-card hover-lift" *ngFor="let opportunity of filteredNewsItems; trackBy: trackByOpportunity" (click)="openOpportunity(opportunity)">
+                <div class="card-content">
+                    <div class="news-meta-row">
+                        <span class="news-meta-chip">{{ opportunity.source }}</span>
+                        <span class="news-date">{{ formatNewsDate(opportunity.publishedAt) }}</span>
+                    </div>
+                    <h3 class="card-title">{{ opportunity.title }}</h3>
+                    <p class="card-description">{{ opportunity.description }}</p>
+                    <div class="card-tags">
+                        <span class="tag" *ngFor="let tag of opportunity.tags">{{ tag }}</span>
+                    </div>
+                </div>
+                <i-lucide [img]="ChevronRightIcon" class="card-arrow"></i-lucide>
+            </div>
+        </div>
+        <div class="empty-news-state" *ngIf="!isNewsLoading && !filteredNewsItems.length && !newsWarning">
+            No matching current-year South Australia agriculture headlines were found for this filter.
+        </div>
+    </section>
+</div>
+
+<!-- Modal Overlay -->
+<div class="modal-overlay" *ngIf="selectedOpportunity" (click)="closeOpportunity()">
+    <div class="modal-container" (click)="$event.stopPropagation()">
+        <button class="modal-close" (click)="closeOpportunity()">
+            <i-lucide [img]="XIcon"></i-lucide>
+        </button>
+
+        <div class="modal-content">
+            <h2 class="modal-title">{{ selectedOpportunity.title }}</h2>
+
+            <p class="modal-description">{{ selectedOpportunity.fullDescription }}</p>
+
+            <div class="modal-highlights">
+                <div class="highlight-chip">
+                    <span class="highlight-label">Source</span>
+                    <strong>{{ selectedOpportunity.source }}</strong>
+                </div>
+                <div class="highlight-chip">
+                    <span class="highlight-label">Published</span>
+                    <strong>{{ formatNewsDate(selectedOpportunity.publishedAt) }}</strong>
+                </div>
+                <div class="highlight-chip">
+                    <span class="highlight-label">Region</span>
+                    <strong>{{ selectedOpportunity.region }}</strong>
+                </div>
+            </div>
+
+            <div class="modal-tags">
+                <span class="tag" *ngFor="let tag of selectedOpportunity.tags">{{ tag }}</span>
+            </div>
+
+            <div class="modal-footer">
+                <h4>Source</h4>
+                <a [href]="selectedOpportunity.sourceUrl" target="_blank" class="source-link">
+                    {{ selectedOpportunity.source }}
+                    <i-lucide [img]="ExternalLinkIcon" class="external-icon"></i-lucide>
+                </a>
+            </div>
+
+            <div class="modal-disclaimer">
+                <h5>Note:</h5>
+                <p>This information is provided for educational purposes only. Always verify details with official
+                    sources and consult with qualified advisors before making business decisions.</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+

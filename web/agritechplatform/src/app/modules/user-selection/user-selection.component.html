@@ -1,0 +1,68 @@
+<div class="user-selection-container">
+    <!-- Header Section -->
+    <div class="header-section">
+        <div class="logo-container">
+            <div class="logo-badge">
+                <i-lucide [img]="LeafIcon" size="24" class="logo-icon" style="color: #2e7d32;"></i-lucide>
+            </div>
+            <div class="logo-copy">
+                <div class="logo-text">
+                    <h1>{{ APP_CONSTANTS.APP_NAME }}</h1>
+                    <p>{{ APP_CONSTANTS.APP_SUBTITLE }}</p>
+                </div>
+                <img class="promatas-logo" [src]="promatasLogoSrc" alt="Promatas logo" />
+            </div>
+        </div>
+    </div>
+
+    <!-- Welcome Section -->
+    <div class="welcome-section">
+        <h2>Welcome Back</h2>
+        <p class="subtitle">Select your profile to continue</p>
+
+        <!-- Loading State -->
+        <div *ngIf="isLoading" class="loading-state">
+            <div class="spinner"></div>
+            <p>Fetching your profiles...</p>
+        </div>
+
+        <!-- Error State -->
+        <div *ngIf="errorMessage && !isLoading" class="error-container">
+            <p class="error-text">{{ errorMessage }}</p>
+            <button (click)="ngOnInit()" class="retry-button">Retry Connection</button>
+        </div>
+
+        <!-- User Grid -->
+        <div *ngIf="!isLoading && users.length > 0" class="user-grid">
+            <div *ngFor="let user of users; let i = index" class="user-card" (click)="selectUser(user)"
+                [class.user-card--bidder]="user.role === 'bidder'"
+                [style.--bg-color]="getAvatarColor(i)">
+                <div class="user-avatar" [style.background]="getAvatarColor(i)">
+                    {{ getInitials(user.userName) }}
+                </div>
+                <div class="user-info">
+                    <div class="user-name-row">
+                        <h3>{{ user.userName }}</h3>
+                        <span class="role-badge" [class.role-badge--bidder]="user.role === 'bidder'">
+                            {{ user.role === 'bidder' ? 'Bidder' : 'Farmer' }}
+                        </span>
+                    </div>
+                    <p class="farm-name">{{ user.role === 'bidder' ? user.farmLocation : user.farmName }}</p>
+                    <p class="location">{{ user.role === 'bidder' ? 'Verified Buyer' : (user.farmLocation + ' • ' + user.primaryCropName) }}</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Empty State -->
+        <div *ngIf="!isLoading && users.length === 0 && !errorMessage" class="empty-state">
+            <p>No user profiles found in the database.</p>
+        </div>
+
+        <div class="security-footer">
+            <span>Secured By</span>
+            <span class="security-logo-wrap">
+                <img class="security-logo" [src]="promasecureLogoSrc" alt="PromaSecure logo" />
+            </span>
+        </div>
+    </div>
+</div>
