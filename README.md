@@ -1,6 +1,6 @@
-# AgriTech Digital Twin Platform
+# AgriOne Digital Twin Platform
 
-Welcome to the AgriTech Digital Twin Platform repository. This is an enterprise-level agriculture production intelligence platform built to monitor, manage, and optimize vineyard operations using real-time IoT metrics, satellite data, and AI-driven agronomy support.
+Welcome to the AgriOne Digital Twin Platform repository. This is an enterprise-level agriculture production intelligence platform built to monitor, manage, and optimize vineyard operations using real-time IoT metrics, satellite data, and AI-driven agronomy support.
 
 ## Repository Architecture
 

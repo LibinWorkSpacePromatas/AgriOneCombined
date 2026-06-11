@@ -1,6 +1,6 @@
-# AgriTech Digital Twin - Mobile App
+# AgriOne Digital Twin - Mobile App
 
-This directory contains the mobile application for the AgriTech Digital Twin platform, built using **React Native**.
+This directory contains the mobile application for the AgriOne Digital Twin platform, built using **React Native**.
 
 ## Prerequisites & Required Accounts
 

@@ -1,4 +1,4 @@
-# AgriTech Digital Twin - Web Platform
+# AgriOne Digital Twin - Web Platform
 
 This directory contains the web-based agriculture decision support platform, which consists of an **Angular 17+ frontend** and a **FastAPI Python backend**.
 
